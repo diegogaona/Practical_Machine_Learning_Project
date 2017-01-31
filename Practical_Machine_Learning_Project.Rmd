@@ -1,0 +1,206 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Diego Gaona"
+date: "January 29, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("C:/Storage/Coursera/Git/Practical_Machine_Learning_Project")
+```
+
+### Background
+
+Using devices such as *Jawbone Up*, *Nike FuelBand*, and *Fitbit* it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how *much* of a particular activity they do, but they rarely quantify *how well they do it*. In this project, my goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways.
+
+More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+### Data
+
+The training data for this project are available here:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from Groupware Technologies - Human Activity Recognition, Weight Lifting Exercises Dataset: http://groupware.les.inf.puc-rio.br/har
+
+### Objective
+
+This project aims to predict the manner in which tue subjects did the exercise, reflected as the "classe" variable in the training set, other variables to predict may be used.
+
+This document describes: 
+- How built the model 
+- How was used the cross validation
+- Conclusions about the out of sample error
+- Choices was made in the process 
+
+And finally using of the model to predict 20 different test cases.
+
+## Getting load the Data
+
+We need to load required packages and set parallel options for improved performance.
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+# needed packages
+library(caret);
+library(parallel); 
+library(doParallel); 
+library(RCurl);
+library(relaxo);
+library(reshape2);
+
+# parallel processing options
+cl <- makeCluster(detectCores() - 2)
+registerDoParallel(cl)
+```
+
+Reading the data previously downloaded into the working directory, tagging the NA and the #DIV/0! when loading
+
+```{r}
+train <- read.csv(file="pml-training.csv", na.strings = c("NA", "#DIV/0!"))
+test <- read.csv(file="pml-testing.csv", na.strings = c("NA", "#DIV/0!"))
+
+```
+
+With the data in the training file we will create some partitions to train and test to work with some models.
+
+Also the NA strings should be cleaned, it is suggested to remove the predictors with more than 80% of NA values, also removing the first five columns thar are not predictors.
+
+```{r}
+
+train.clean <- sapply(colnames(train), function(x) 
+                      if(sum(is.na(train[, x])) > 0.8 * nrow(train)) {return(TRUE)} 
+                      else{return(FALSE)}
+                      )
+train <- train[, !train.clean]
+
+#subsetting the training without columns that are not predictors
+train.noID <- train[, -(1:5)]
+
+# Create partitions for train and test
+# 
+set.seed(1234)
+inTrain <- createDataPartition(train.noID[,1], p = 0.5, list = FALSE)
+train.DF <- train.noID[inTrain,]
+test.DF <- train.noID[-inTrain,]
+```
+
+## Testing accuracy
+
+Testing different models to identify the best. 
+
+```{r}
+
+testModel <- function(tr, ts, m = "lm", usePCA = FALSE) {
+  preProc = NULL;
+  Fit = NULL;
+  
+  if (usePCA) { preProc = "pca" }
+  
+  if (m == "rf") {
+    Fit <- train(classe ~ ., method = m, data = tr, preProcess = preProc, trControl = fitControl, ntree = 10)
+  }
+  else {
+    Fit <- train(classe ~ ., method = m, data = tr, preProcess = preProc, trControl = fitControl)
+  }
+  
+  cm <- confusionMatrix(ts$classe, predict(Fit, newdata = ts))
+  
+  Accuracy <- round(cm$overall[[1]], 6)
+  
+  Accuracy
+}
+```
+
+
+```{r}
+
+# 10 fold cross-validation
+fitControl <- trainControl(method = "cv", number = 10, allowParallel = TRUE)
+
+```
+
+The following models will be tested:
+
+```{r}
+# CART, Randon Forest, Stochastic Gradient Boosting and Naive Bayes, testing without and with PCA.
+
+tryModels <- c("rpart","rf","gbm","nb")
+
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+
+testResults <- matrix(ncol=3, nrow=8)
+
+for (i in 1:4) {
+  testResults[i,1] <- tryModels[i]
+  testResults[i,2] <- testModel(train.DF, test.DF, m = tryModels[i])
+  testResults[i,3] <- FALSE
+}
+for (i in 1:4) {
+  testResults[i+4,1] <- tryModels[i]
+  testResults[i+4,2] <- testModel(train.DF, test.DF, m = tryModels[i], usePCA = TRUE)
+  testResults[i+4,3] <- TRUE
+}
+```
+
+From the analisys the following numbers result:
+
+```{r, echo=FALSE}
+testResults <- data.frame(testResults)
+colnames(testResults) <- c("Method", "Accuracy", "PCA")
+testResults
+```
+
+## Selecting the model
+
+From analisys  the best method to estimate the outcome is Random Forest (Accuracy: 0.989) and/or Stochastic Gradient Boosting (Accuracy: 0.980) so we will continue with **Random Forest**. 
+
+```{r}
+Fit <- train(classe ~ ., method = "rf", data = train.noID, trControl = fitControl, ntree = 10)
+# stop the cluster and releasing resources
+stopCluster(cl)
+
+# final model
+Fit$finalModel
+```
+
+The final rf model uses classification: 10 trees with 28 variables. 
+The estimated out of sample error rate is 1.3% as reported and would be considered acceptable.
+
+```{r message=FALSE, warning=FALSE, include=TRUE}
+
+# confusion matrix
+cm <- data.frame(as.table(Fit$finalModel$confusion[(1:5), (1:5)] / summary(train.noID$classe)))
+colnames(cm) <- c("Reference", "Prediction", "value")
+
+# Plot Confusion matrix
+g <- ggplot(cm, aes(Reference, Prediction)) + labs(title = "Accuracy matrix")
+g <- g + geom_tile(aes(fill = value), colour = "white")
+g <- g + geom_text(aes(label= ifelse(value == 0, "", round(value, 5))), color = "black", size = 3)
+g <- g + scale_fill_gradient(low = "white", high = "cyan")
+g
+```
+
+## Prediction
+
+Now, after verifiying the performance of the model selected, predict the *classe* for the **training** data.
+
+```{r}
+# prediction
+
+``` 
+
+```{r}
+prediction <- predict(Fit, test)
+
+#the predicted 20 classe values for testing are
+paste(as.character(prediction), sep=", ")
+```
+
+---
